@@ -27,6 +27,11 @@ const orderSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    deliveryFee: {
+  type: Number,
+  required: true,
+  default: 0,
+},
     paymentStatus: {
       type: String,
       enum: ["Pending", "Paid", "Failed"],
@@ -48,6 +53,33 @@ const orderSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    riskScore:{
+      type: Number,
+      default: 0,
+    },
+    isSuspicious:{
+      type: Boolean,
+      default: false,
+    },
+
+    fraudReasons: [
+      {
+        type: String,
+      }
+    ],
+
+    fraudStatus: {
+      type: String,
+      enum: ["none","pending","approved","rejected"],
+      default: "none",
+    },
+
+    deliveryPartner: {
+  type: mongoose.Schema.Types.ObjectId,
+  ref: "DeliveryPartner",
+  default: null
+},
+
   },
   { timestamps: true },
 );

@@ -17,13 +17,22 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["user", "admin", "restaurant"],
+      enum: ["user", "admin", "restaurant","delivery"],
       default: "user",
     },
     isblocked: {
       type: Boolean,
       default: false,
     },
+    preferredCuisines: {
+  type: [String],
+  default: [],
+},
+
+frequentlyOrderedItems: {
+  type: [String],
+  default: [],
+},
   },
   { timestamps: true },
 );

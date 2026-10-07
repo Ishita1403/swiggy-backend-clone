@@ -1,5 +1,48 @@
 const restaurant = require("../models/restaurant");
 
+function isFuzzyMatch(search, text) {
+  search = search.toLowerCase();
+  text = text.toLowerCase();
+
+  if (text.includes(search)) {
+    return true;
+  }
+
+  const words = text.split(/\s+/);
+
+  return words.some((word) => {
+    if (Math.abs(word.length - search.length) > 1) {
+      return false;
+    }
+
+    const matrix = [];
+
+    for (let i = 0; i <= word.length; i++) {
+      matrix[i] = [i];
+    }
+
+    for (let j = 0; j <= search.length; j++) {
+      matrix[0][j] = j;
+    }
+
+    for (let i = 1; i <= word.length; i++) {
+      for (let j = 1; j <= search.length; j++) {
+        if (word[i - 1] === search[j - 1]) {
+          matrix[i][j] = matrix[i - 1][j - 1];
+        } else {
+          matrix[i][j] =
+            Math.min(
+              matrix[i - 1][j],
+              matrix[i][j - 1],
+              matrix[i - 1][j - 1]
+            ) + 1;
+        }
+      }
+    }
+
+    return matrix[word.length][search.length] <= 1;
+  });
+}
 exports.createRestaurant = async (req, res) => {
   try {
     if (req.user.role !== "restaurant") {
@@ -111,6 +154,80 @@ exports.getAllRestaurants = async (req, res) => {
       success: false,
       message: "Error fetching restaurants",
       error: error.message,
+    });
+  }
+};
+exports.searchRestaurants = async (req, res) => {
+  try {
+    const {
+      cuisine,
+      rating,
+      maxDeliveryTime,
+      minPrice,
+      maxPrice,
+      isVeg,
+      search,
+    } = req.query;
+
+    const match = {};
+
+    if (cuisine) {
+      match.cuisine = { $regex: cuisine, $options: "i" };
+    }
+
+    if (rating) {
+      match.rating = { $gte: Number(rating) };
+    }
+
+    if (maxDeliveryTime) {
+      match.deliveryTime = { $lte: Number(maxDeliveryTime) };
+    }
+
+    if (minPrice || maxPrice) {
+      match.priceRange = {};
+
+      if (minPrice) {
+        match.priceRange.$gte = Number(minPrice);
+      }
+
+      if (maxPrice) {
+        match.priceRange.$lte = Number(maxPrice);
+      }
+    }
+
+    if (isVeg !== undefined) {
+      match.isVeg = isVeg === "true";
+    }
+
+    if (search) {
+  const allRestaurants = await restaurant.find({});
+
+  const matchingIds = allRestaurants
+    .filter((r) => isFuzzyMatch(search, r.name))
+    .map((r) => r._id);
+
+  match._id = { $in: matchingIds };
+}
+
+    const restaurants = await restaurant.aggregate([
+      { $match: match },
+      {
+        $sort: {
+          popularity: -1,
+          rating: -1,
+        },
+      },
+    ]);
+
+    res.status(200).json({
+      success: true,
+      count: restaurants.length,
+      data: restaurants,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
     });
   }
 };

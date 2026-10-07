@@ -1,6 +1,9 @@
 const Order = require("../models/order");
+const { calculateRiskScore } = require("../services/fraudDetectionService");
 const Cart = require("../models/Cart");
 const restaurant = require("../models/restaurant");
+const DeliveryPartner = require("../models/deliveryPartner");
+const { getIO } = require("../../utils/socket");
 
 
 // ✅ Place Order
@@ -18,6 +21,7 @@ exports.placeOrder = async (req, res) => {
         message: "Cart is empty"
       });
     }
+    const fraudCheck = await calculateRiskScore(req.user._id);
 
     // Validate restaurant approved
     if (!cart.restaurant.isApproved) {
@@ -39,13 +43,65 @@ exports.placeOrder = async (req, res) => {
       return total + item.price * item.quantity;
     }, 0);
 
+   const SurgeSettings = require("../models/surgeSettings");
+
+let settings = await SurgeSettings.findOne();
+
+if (!settings) {
+  settings = await SurgeSettings.create({});
+}
+
+const recentOrders = await Order.countDocuments({
+  restaurant: cart.restaurant._id,
+  createdAt: {
+    $gte: new Date(Date.now() - 60 * 60 * 1000)
+  }
+});
+
+const hour = new Date().getHours();
+
+let surgeMultiplier = 1;
+
+if (recentOrders >= 5) {
+  surgeMultiplier = surgeMultiplier * 1.2;
+}
+
+if (
+  (hour >= settings.lunchStart && hour <= settings.lunchEnd) ||
+  (hour >= settings.dinnerStart && hour <= settings.dinnerEnd)
+) {
+  surgeMultiplier = surgeMultiplier * settings.surgeMultiplier;
+}
+
+const deliveryFee = settings.baseDeliveryFee * surgeMultiplier;
+const deliveryPartner = await DeliveryPartner.findOne({
+  isAvailable: true,
+  location: {
+    $near: {
+      $geometry: cart.restaurant.location,
+      $maxDistance: 10000
+    }
+  }
+}).sort({ currentWorkload: 1 });
     const order = await Order.create({
       user: req.user._id,
       restaurant: cart.restaurant._id,
+      deliveryPartner: deliveryPartner ? deliveryPartner._id : null,
       items,
       totalAmount,
-      deliveryAddress
+      deliveryFee,
+      deliveryAddress,
+
+      riskScore: fraudCheck.score,
+      isSuspicious: fraudCheck.isSuspicious,
+      fraudReasons: fraudCheck.reasons,
+      fraudStatus: fraudCheck.isSuspicious ? "pending" : "none",
     });
+
+    if (deliveryPartner) {
+  deliveryPartner.currentWorkload += 1;
+  await deliveryPartner.save();
+}
 
     // Clear cart after order
     await Cart.findOneAndDelete({ user: req.user._id });
@@ -79,7 +135,32 @@ exports.getMyOrders = async (req, res) => {
   }
 };
 
+// Get single order details
+exports.getOrderById = async (req, res) => {
+  try {
+    const order = await Order.findOne({
+      _id: req.params.orderId,
+      user: req.user._id
+    }).populate("deliveryPartner");
 
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found"
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: order
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
 
 // ✅ Get Restaurant Orders
 exports.getRestaurantOrders = async (req, res) => {
@@ -150,6 +231,14 @@ exports.updateOrderStatus = async (req, res) => {
     order.orderStatus = status;
     await order.save();
 
+    const io = getIO();
+
+io.to(order.user.toString()).emit("orderStatusUpdated", {
+  orderId: order._id,
+  status: order.orderStatus,
+  message: `Your order status is now ${order.orderStatus}`,
+});
+
     res.status(200).json({
       success: true,
       message: "Order status updated",
@@ -158,5 +247,100 @@ exports.updateOrderStatus = async (req, res) => {
 
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.cancelOrder = async (req, res) => {
+  try {
+    const order = await Order.findOne({
+      _id: req.params.orderId,
+      user: req.user._id,
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        message: "Order not found",
+      });
+    }
+
+    if (order.orderStatus === "Delivered") {
+      return res.status(400).json({
+        message: "Delivered orders cannot be cancelled",
+      });
+    }
+
+    if (order.orderStatus === "Cancelled") {
+      return res.status(400).json({
+        message: "Order is already cancelled",
+      });
+    }
+
+    order.orderStatus = "Cancelled";
+    await order.save();
+
+    const fraudCheck = await calculateRiskScore(req.user._id);
+
+order.riskScore = fraudCheck.score;
+order.isSuspicious = fraudCheck.isSuspicious;
+order.fraudReasons = fraudCheck.reasons;
+order.fraudStatus = fraudCheck.isSuspicious ? "pending" : "none";
+
+await order.save();
+
+    res.status(200).json({
+      message: "Order cancelled successfully",
+      order,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: error.message,
+    });
+  }
+};
+
+exports.calculateDeliveryFee = async (req, res) => {
+  try {
+    const SurgeSettings = require("../models/surgeSettings");
+
+    let settings = await SurgeSettings.findOne();
+
+    if (!settings) {
+      settings = await SurgeSettings.create({});
+    }
+
+    const hour = new Date().getHours();
+
+    let surgeMultiplier = 1;
+
+   const recentOrders = await Order.countDocuments({
+  restaurant: req.query.restaurantId,
+  createdAt: {
+    $gte: new Date(Date.now() - 60 * 60 * 1000)
+  }
+});
+
+if (recentOrders >= 5) {
+  surgeMultiplier = surgeMultiplier * 1.2;
+}
+
+    if (
+  (hour >= settings.lunchStart && hour <= settings.lunchEnd) ||
+  (hour >= settings.dinnerStart && hour <= settings.dinnerEnd)
+) {
+  surgeMultiplier = surgeMultiplier * settings.surgeMultiplier;
+}
+    const deliveryFee = settings.baseDeliveryFee * surgeMultiplier;
+
+    res.status(200).json({
+      success: true,
+      baseFee: settings.baseDeliveryFee,
+      surgeMultiplier,
+      deliveryFee,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
